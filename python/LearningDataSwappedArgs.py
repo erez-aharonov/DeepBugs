@@ -4,12 +4,13 @@ Created on Nov 9, 2017
 @author: Michael Pradel
 '''
 
-import Util
+from python import Util
 from collections import Counter
 
 name_embedding_size = 200
 file_name_embedding_size = 50
 type_embedding_size = 5
+
 
 class CodePiece(object):
     def __init__(self, callee, arguments, src):
@@ -19,7 +20,8 @@ class CodePiece(object):
     
     def to_message(self):
         return str(self.src) + " | " + str(self.callee) + " | " + str(self.arguments)
-        
+
+
 class LearningData(object):
     def __init__(self):
         self.stats = {"calls": 0, "calls_with_two_args": 0, "calls_with_known_names": 0,
