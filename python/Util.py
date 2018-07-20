@@ -8,6 +8,7 @@ from scipy.spatial.distance import cosine
 import random
 import json
 
+
 def in_group_similarity(vector_group):
     vector_group = list(vector_group)
     in_group_simil = 0.0
@@ -20,6 +21,7 @@ def in_group_similarity(vector_group):
             in_group_ctr += 1
     in_group_simil = in_group_simil / in_group_ctr
     return in_group_simil
+
 
 def out_group_similarity(vector_group, other_vectors):
     other_vectors = list(other_vectors)
@@ -35,6 +37,7 @@ def out_group_similarity(vector_group, other_vectors):
     out_group_simil = out_group_simil / out_group_ctr
     return out_group_simil
 
+
 class DataReader(object):
     def __init__(self, data_paths):
         self.data_paths = data_paths
@@ -46,7 +49,8 @@ class DataReader(object):
                 calls = json.load(file)
                 for call in calls:
                     yield call
-                    
+
+
 def analyze_histograms(counter):
     total = sum(counter.values())
     sorted_pairs = counter.most_common()
@@ -65,4 +69,3 @@ def analyze_histograms(counter):
                 percentages_to_cover = percentages_to_cover[1:]
             else:
                 done = True
-        

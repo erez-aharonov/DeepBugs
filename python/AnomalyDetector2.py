@@ -4,7 +4,6 @@ Created on Jun 23, 2017
 @author: Michael Pradel
 """
 
-import sys
 import json
 from os.path import join
 from os import getcwd
@@ -15,6 +14,7 @@ from keras.models import Sequential
 from keras.layers.core import Dense, Dropout
 import time
 import numpy as np
+import glob
 from python import Util
 from python import LearningDataSwappedArgs
 from python import LearningDataBinOperator
@@ -30,54 +30,9 @@ type_embedding_size = 5
 Anomaly = namedtuple("Anomaly", ["message", "score"])
 
 
-def parse_data_paths(args):
-    training_data_paths = []
-    eval_data_paths = []
-    mode = None
-    for arg in args:
-        if arg == "--trainingData":
-            assert mode is None
-            mode = "trainingData"
-        elif arg == "--validationData":
-            assert mode == "trainingData"
-            mode = "validationData"
-        else:
-            path = join(getcwd(), arg)
-            if mode == "trainingData":
-                training_data_paths.append(path)
-            elif mode == "validationData":
-                eval_data_paths.append(path)
-            else:
-                print("Incorrect arguments")
-                sys.exit(0)
-    return [training_data_paths, eval_data_paths]
-
-
-def prepare_xy_pairs(data_paths, learning_data, name_to_vector, type_to_vector, node_type_to_vector):
-    xs = []
-    ys = []
-    code_pieces = []  # keep calls in addition to encoding as x,y pairs (to report detected anomalies)
-    
-    for code_piece in Util.DataReader(data_paths):
-        learning_data.code_to_xy_pairs(
-            code_piece,
-            xs,
-            ys,
-            name_to_vector,
-            type_to_vector,
-            node_type_to_vector,
-            code_pieces)
-    x_length = len(xs[0])
-    
-#     print("Stats: " + str(learning_data.stats))
-    print("Number of x,y pairs: " + str(len(xs)))
-    print("Length of x vectors: " + str(x_length))
-    return [np.array(xs), np.array(ys), code_pieces]
-
-
-class AnomalyDetector(object):
+class AnomalyDetectorLearner(object):
     def __init__(self):
-        self._what = None
+        self._anomaly_type = None
         self._option = None
         self._name_to_vector_file = None
         self._type_to_vector_file = None
@@ -95,23 +50,17 @@ class AnomalyDetector(object):
         self._xs_validation = None
         self._code_pieces_validation = None
 
-    def read_parameters(self, arguments_list):
-        self._what = arguments_list[1]
-        self._option = arguments_list[2]
-        if self._option == "--learn":
-            self._name_to_vector_file = join(getcwd(), arguments_list[3])
-            self._type_to_vector_file = join(getcwd(), arguments_list[4])
-            self._node_type_to_vector_file = join(getcwd(), arguments_list[5])
-            self._training_data_paths, self._validation_data_paths = parse_data_paths(arguments_list[6:])
-        elif self._option == "--load":
-            raise NotImplementedError("--load option is buggy and currently disabled")
-            # model_file = arguments_list[3]
-            # name_to_vector_file = join(getcwd(), arguments_list[4])
-            # type_to_vector_file = join(getcwd(), arguments_list[5])
-            # node_type_to_vector_file = join(getcwd(), arguments_list[6])
-            # training_data_paths, validation_data_paths = parse_data_paths(arguments_list[7:])
-        else:
-            raise Exception("Incorrect arguments")
+    def set_anomaly_type(self, anomaly_type):
+        self._anomaly_type = anomaly_type
+
+    def set_embeddings_file_paths(self, name_to_vector_file, type_to_vector_file, node_type_to_vector_file):
+        self._name_to_vector_file = join(getcwd(), name_to_vector_file)
+        self._type_to_vector_file = join(getcwd(), type_to_vector_file)
+        self._node_type_to_vector_file = join(getcwd(), node_type_to_vector_file)
+
+    def set_training_validation_data_paths(self, training_data_path_pattern, validation_data_path_pattern):
+        self._training_data_paths = self._parse_data_path_pattern(training_data_path_pattern)
+        self._validation_data_paths = self._parse_data_path_pattern(validation_data_path_pattern)
 
     def read_embeddings_from_files(self):
         with open(self._name_to_vector_file) as f:
@@ -122,17 +71,17 @@ class AnomalyDetector(object):
             self._node_type_to_vector = json.load(f)
 
     def create_anomaly_detector_of_interest(self):
-        if self._what == "SwappedArgs":
+        if self._anomaly_type == "SwappedArgs":
             self._learning_data = LearningDataSwappedArgs.LearningData()
-        elif self._what == "BinOperator":
+        elif self._anomaly_type == "BinOperator":
             self._learning_data = LearningDataBinOperator.LearningData()
-        elif self._what == "SwappedBinOperands":
+        elif self._anomaly_type == "SwappedBinOperands":
             self._learning_data = LearningDataSwappedBinOperands.LearningData()
-        elif self._what == "IncorrectBinaryOperand":
+        elif self._anomaly_type == "IncorrectBinaryOperand":
             self._learning_data = LearningDataIncorrectBinaryOperand.LearningData()
-        elif self._what == "IncorrectAssignment":
+        elif self._anomaly_type == "IncorrectAssignment":
             self._learning_data = LearningDataIncorrectAssignment.LearningData()
-        elif self._what == "MissingArg":
+        elif self._anomaly_type == "MissingArg":
             self._learning_data = LearningDataMissingArg.LearningData()
         else:
             raise Exception("Incorrect argument for 'what'")
@@ -145,7 +94,7 @@ class AnomalyDetector(object):
         # prepare x,y pairs for learning and validation
         print("Preparing xy pairs for training data:")
         self._xs_training, self._ys_training, _ = \
-            prepare_xy_pairs(
+            self._prepare_xy_pairs(
                 self._training_data_paths,
                 self._learning_data,
                 self._name_to_vector,
@@ -155,32 +104,37 @@ class AnomalyDetector(object):
         print("Training examples   : " + str(len(self._xs_training)))
 
     def train_or_load_model(self):
-        # manual validation of stored model (for debugging)
-        if self._option == "--load":
-            raise NotImplementedError("--load option is buggy and currently disabled")
-            # model = load_model(model_file)
-            # print("Loaded model.")
-        elif self._option == "--learn":
-            # simple feedforward network
-            model = Sequential()
-            model.add(Dropout(0.2, input_shape=(self._x_length,)))
-            model.add(Dense(200, input_dim=self._x_length, activation="relu", kernel_initializer='normal'))
-            model.add(Dropout(0.2))
-            # model.add(Dense(200, activation="relu"))
-            model.add(Dense(1, activation="sigmoid", kernel_initializer='normal'))
+        self._build_and_train_model()
 
-            # train
-            model.compile(loss='binary_crossentropy', optimizer='rmsprop', metrics=['accuracy'])
-            model.fit(self._xs_training, self._ys_training, batch_size=100, epochs=10, verbose=1)
+    def _build_and_train_model(self):
+        model = self._build_simple_feed_forward_network()
+        self._compile_and_train_model(model)
+        self._save_model(model)
+        self._model = model
 
-            time_stamp = math.floor(time.time() * 1000)
-            model.save("anomaly_detection_model_" + str(time_stamp))
-            self._model = model
+    def _build_simple_feed_forward_network(self):
+        model = Sequential()
+        model.add(Dropout(0.2, input_shape=(self._x_length,)))
+        model.add(Dense(200, input_dim=self._x_length, activation="relu", kernel_initializer='normal'))
+        model.add(Dropout(0.2))
+        # model.add(Dense(200, activation="relu"))
+        model.add(Dense(1, activation="sigmoid", kernel_initializer='normal'))
+        return model
+
+    def _compile_and_train_model(self, model):
+        # train
+        model.compile(loss='binary_crossentropy', optimizer='rmsprop', metrics=['accuracy'])
+        model.fit(self._xs_training, self._ys_training, batch_size=100, epochs=10, verbose=1)
+
+    @staticmethod
+    def _save_model(model):
+        time_stamp = math.floor(time.time() * 1000)
+        model.save("anomaly_detection_model_" + str(time_stamp))
 
     def evaluate_model_on_validation_data(self):
         print("Preparing xy pairs for validation data:")
         self._xs_validation, ys_validation, self._code_pieces_validation = \
-            prepare_xy_pairs(
+            self._prepare_xy_pairs(
                 self._validation_data_paths,
                 self._learning_data,
                 self._name_to_vector,
@@ -194,7 +148,6 @@ class AnomalyDetector(object):
         print("Validation loss & accuracy: " + str(validation_loss))
 
     def compute_precision_and_recall_with_different_thresholds_for_reporting_anomalies(self):
-        # compute precision and recall with different thresholds for reporting anomalies
         # assumption: correct and swapped arguments are alternating in list of x-y pairs
         threshold_to_correct = Counter()
         threshold_to_incorrect = Counter()
@@ -215,7 +168,7 @@ class AnomalyDetector(object):
                 self._learning_data.normal_score(
                     y_prediction_orig,
                     y_prediction_changed)
-            is_anomaly = False
+            # is_anomaly = False
             for threshold_raw in range(1, 20, 1):
                 threshold = threshold_raw / 20.0
                 suggests_change_of_orig = anomaly_score >= threshold
@@ -233,16 +186,16 @@ class AnomalyDetector(object):
                 else:
                     threshold_to_incorrect[threshold] += 1
 
-                # check if we found an anomaly in the original code
-                if suggests_change_of_orig:
-                    is_anomaly = True
+                # # check if we found an anomaly in the original code
+                # if suggests_change_of_orig:
+                #     is_anomaly = True
 
-            if is_anomaly:
-                code_piece = self._code_pieces_validation[idx]
-                message = "Score : " + str(anomaly_score) + " | " + code_piece.to_message()
-                #             print("Possible anomaly: "+message)
-                # Log the possible anomaly for future manual inspection
-                poss_anomalies.append(Anomaly(message, anomaly_score))
+            # if is_anomaly:
+            #     code_piece = self._code_pieces_validation[idx]
+            #     message = "Score : " + str(anomaly_score) + " | " + code_piece.to_message()
+            #     #             print("Possible anomaly: "+message)
+            #     # Log the possible anomaly for future manual inspection
+            #     poss_anomalies.append(Anomaly(message, anomaly_score))
 
         f_inspect = open('poss_anomalies.txt', 'w+')
         poss_anomalies = sorted(poss_anomalies, key=lambda a: -a.score)
@@ -265,30 +218,29 @@ class AnomalyDetector(object):
                 round(recall, 4)) + "   Precision: " + str(round(precision, 4)) + "  #Warnings: " + str(
                 threshold_to_warnings_in_orig_code[threshold]))
 
+    @staticmethod
+    def _parse_data_path_pattern(data_path_pattern):
+        data_paths_list = glob.glob(join(getcwd(), data_path_pattern))
+        return data_paths_list
 
-if __name__ == '__main__':
-    # arguments (for learning new model): what --learn <name to vector file> <type to vector file>
-    # <AST node type to vector file> --trainingData <list of call data files> --validationData <list of call data files>
-    # arguments (for learning new model): what --load <model file> <name to vector file> <type to vector file>
-    # <AST node type to vector file> --trainingData <list of call data files> --validationData <list of call data files>
-    #   what is one of: SwappedArgs, BinOperator, SwappedBinOperands, IncorrectBinaryOperand, IncorrectAssignment
+    @staticmethod
+    def _prepare_xy_pairs(data_paths, learning_data, name_to_vector, type_to_vector, node_type_to_vector):
+        xs = []
+        ys = []
+        code_pieces = []  # keep calls in addition to encoding as x,y pairs (to report detected anomalies)
 
-    print("AnomalyDetector2 started with " + str(sys.argv))
-    time_start = time.time()
+        for code_piece in Util.DataReader(data_paths):
+            learning_data.code_to_xy_pairs(
+                code_piece,
+                xs,
+                ys,
+                name_to_vector,
+                type_to_vector,
+                node_type_to_vector,
+                code_pieces)
+        x_length = len(xs[0])
 
-    anomaly_detector = AnomalyDetector()
-    anomaly_detector.read_parameters(sys.argv)
-    anomaly_detector.read_embeddings_from_files()
-    anomaly_detector.create_anomaly_detector_of_interest()
-    anomaly_detector.print_statistics_on_training_data()
-    anomaly_detector.prepare_xy_pairs_for_learning_and_validation()
-    anomaly_detector.train_or_load_model()
-    
-    time_learning_done = time.time()
-    print("Time for learning (seconds): " + str(round(time_learning_done - time_start)))
-
-    anomaly_detector.evaluate_model_on_validation_data()
-    anomaly_detector.compute_precision_and_recall_with_different_thresholds_for_reporting_anomalies()
-
-    time_prediction_done = time.time()
-    print("Time for prediction (seconds): " + str(round(time_prediction_done - time_learning_done)))
+        #     print("Stats: " + str(learning_data.stats))
+        print("Number of x,y pairs: " + str(len(xs)))
+        print("Length of x vectors: " + str(x_length))
+        return [np.array(xs), np.array(ys), code_pieces]
