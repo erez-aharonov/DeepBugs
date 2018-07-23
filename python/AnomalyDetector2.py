@@ -15,6 +15,7 @@ from keras.layers.core import Dense, Dropout
 import time
 import numpy as np
 import glob
+import pickle
 from python import Util
 from python import LearningDataSwappedArgs
 from python import LearningDataBinOperator
@@ -23,6 +24,7 @@ from python import LearningDataIncorrectBinaryOperand
 from python import LearningDataIncorrectAssignment
 from python import LearningDataMissingArg
 
+
 name_embedding_size = 200
 file_name_embedding_size = 50
 type_embedding_size = 5
@@ -30,8 +32,9 @@ type_embedding_size = 5
 Anomaly = namedtuple("Anomaly", ["message", "score"])
 
 
-class AnomalyDetectorLearner(object):
+class AnomalyDetectorTrainee(object):
     def __init__(self):
+        self._max_files_list_length = None
         self._anomaly_type = None
         self._option = None
         self._name_to_vector_file = None
@@ -48,7 +51,15 @@ class AnomalyDetectorLearner(object):
         self._x_length = None
         self._model = None
         self._xs_validation = None
+        self._ys_validation = None
         self._code_pieces_validation = None
+        self._do_load_previous_data = False
+        self._train_xy_code_pieces_pickle_file_path = "train_xy_code_pieces.pickle"
+        self._validate_xy_code_pieces_pickle_file_path = "validate_xy_code_pieces.pickle"
+        self._data_dump_path = "data_dump.pickle"
+
+    def set_max_files_list_length(self, max_files_list_length):
+        self._max_files_list_length = max_files_list_length
 
     def set_anomaly_type(self, anomaly_type):
         self._anomaly_type = anomaly_type
@@ -62,7 +73,31 @@ class AnomalyDetectorLearner(object):
         self._training_data_paths = self._parse_data_path_pattern(training_data_path_pattern)
         self._validation_data_paths = self._parse_data_path_pattern(validation_data_path_pattern)
 
-    def read_embeddings_from_files(self):
+    def set_do_load_previous_data(self, do_load_previous_data):
+        self._do_load_previous_data = do_load_previous_data
+
+    def prepare_for_training_and_validation(self):
+        if not self._do_load_previous_data:
+            self._read_embeddings_from_files()
+            self._create_anomaly_detector_of_interest()
+            self._print_statistics_on_training_data()
+            self._prepare_xy_pairs_for_training()
+            self._prepare_xy_pairs_for_validation()
+            self._dump_data()
+        else:
+            self._load_previous_data()
+
+    def _dump_data(self):
+        data_to_dump = [
+            self._learning_data,
+            self._xs_training,
+            self._ys_training,
+            self._xs_validation,
+            self._ys_validation,
+            self._code_pieces_validation]
+        pickle.dump(data_to_dump, open(self._data_dump_path, "wb"))
+
+    def _read_embeddings_from_files(self):
         with open(self._name_to_vector_file) as f:
             self._name_to_vector = json.load(f)
         with open(self._type_to_vector_file) as f:
@@ -70,7 +105,7 @@ class AnomalyDetectorLearner(object):
         with open(self._node_type_to_vector_file) as f:
             self._node_type_to_vector = json.load(f)
 
-    def create_anomaly_detector_of_interest(self):
+    def _create_anomaly_detector_of_interest(self):
         if self._anomaly_type == "SwappedArgs":
             self._learning_data = LearningDataSwappedArgs.LearningData()
         elif self._anomaly_type == "BinOperator":
@@ -86,11 +121,11 @@ class AnomalyDetectorLearner(object):
         else:
             raise Exception("Incorrect argument for 'what'")
 
-    def print_statistics_on_training_data(self):
+    def _print_statistics_on_training_data(self):
         print("Statistics on training data:")
         self._learning_data.pre_scan(self._training_data_paths, self._validation_data_paths)
 
-    def prepare_xy_pairs_for_learning_and_validation(self):
+    def _prepare_xy_pairs_for_training(self):
         # prepare x,y pairs for learning and validation
         print("Preparing xy pairs for training data:")
         self._xs_training, self._ys_training, _ = \
@@ -102,6 +137,18 @@ class AnomalyDetectorLearner(object):
                 self._node_type_to_vector)
         self._x_length = len(self._xs_training[0])
         print("Training examples   : " + str(len(self._xs_training)))
+        print("saving to pickle ...")
+        pickle.dump([self._xs_training, self._ys_training], open(self._train_xy_code_pieces_pickle_file_path, "wb"))
+
+    def _load_previous_data(self):
+        self._learning_data, \
+        self._xs_training, \
+        self._ys_training, \
+        self._xs_validation, \
+        self._ys_validation, \
+        self._code_pieces_validation = \
+            pickle.load(open(self._data_dump_path, "rb"))
+        self._x_length = len(self._xs_training[0])
 
     def train_or_load_model(self):
         self._build_and_train_model()
@@ -132,8 +179,13 @@ class AnomalyDetectorLearner(object):
         model.save("anomaly_detection_model_" + str(time_stamp))
 
     def evaluate_model_on_validation_data(self):
+        validation_loss = self._model.evaluate(self._xs_validation, self._ys_validation)
+        print()
+        print("Validation loss & accuracy: " + str(validation_loss))
+
+    def _prepare_xy_pairs_for_validation(self):
         print("Preparing xy pairs for validation data:")
-        self._xs_validation, ys_validation, self._code_pieces_validation = \
+        self._xs_validation, self._ys_validation, self._code_pieces_validation = \
             self._prepare_xy_pairs(
                 self._validation_data_paths,
                 self._learning_data,
@@ -141,11 +193,10 @@ class AnomalyDetectorLearner(object):
                 self._type_to_vector,
                 self._node_type_to_vector)
         print("Validation examples : " + str(len(self._xs_validation)))
-
-        # validate
-        validation_loss = self._model.evaluate(self._xs_validation, ys_validation)
-        print()
-        print("Validation loss & accuracy: " + str(validation_loss))
+        data_to_dump = [self._xs_validation, self._ys_validation, self._code_pieces_validation]
+        # data_to_dump = [self._xs_validation, self._ys_validation]
+        print("saving to pickle ...")
+        pickle.dump(data_to_dump, open(self._validate_xy_code_pieces_pickle_file_path, "wb"))
 
     def compute_precision_and_recall_with_different_thresholds_for_reporting_anomalies(self):
         # assumption: correct and swapped arguments are alternating in list of x-y pairs
@@ -168,7 +219,7 @@ class AnomalyDetectorLearner(object):
                 self._learning_data.normal_score(
                     y_prediction_orig,
                     y_prediction_changed)
-            # is_anomaly = False
+            is_anomaly = False
             for threshold_raw in range(1, 20, 1):
                 threshold = threshold_raw / 20.0
                 suggests_change_of_orig = anomaly_score >= threshold
@@ -186,16 +237,16 @@ class AnomalyDetectorLearner(object):
                 else:
                     threshold_to_incorrect[threshold] += 1
 
-                # # check if we found an anomaly in the original code
-                # if suggests_change_of_orig:
-                #     is_anomaly = True
+                # check if we found an anomaly in the original code
+                if suggests_change_of_orig:
+                    is_anomaly = True
 
-            # if is_anomaly:
-            #     code_piece = self._code_pieces_validation[idx]
-            #     message = "Score : " + str(anomaly_score) + " | " + code_piece.to_message()
-            #     #             print("Possible anomaly: "+message)
-            #     # Log the possible anomaly for future manual inspection
-            #     poss_anomalies.append(Anomaly(message, anomaly_score))
+            if is_anomaly:
+                code_piece = self._code_pieces_validation[idx]
+                message = "Score : " + str(anomaly_score) + " | " + code_piece.to_message()
+                print("Possible anomaly: " + message)
+                # Log the possible anomaly for future manual inspection
+                poss_anomalies.append(Anomaly(message, anomaly_score))
 
         f_inspect = open('poss_anomalies.txt', 'w+')
         poss_anomalies = sorted(poss_anomalies, key=lambda a: -a.score)
@@ -218,29 +269,27 @@ class AnomalyDetectorLearner(object):
                 round(recall, 4)) + "   Precision: " + str(round(precision, 4)) + "  #Warnings: " + str(
                 threshold_to_warnings_in_orig_code[threshold]))
 
-    @staticmethod
-    def _parse_data_path_pattern(data_path_pattern):
-        data_paths_list = glob.glob(join(getcwd(), data_path_pattern))
+    def _parse_data_path_pattern(self, data_path_pattern):
+        data_paths_list = glob.glob(join(getcwd(), data_path_pattern))[:self._max_files_list_length]
         return data_paths_list
 
     @staticmethod
     def _prepare_xy_pairs(data_paths, learning_data, name_to_vector, type_to_vector, node_type_to_vector):
-        xs = []
-        ys = []
-        code_pieces = []  # keep calls in addition to encoding as x,y pairs (to report detected anomalies)
+        xs_list = []
+        ys_list = []
+        code_pieces_list = []  # keep calls in addition to encoding as x,y pairs (to report detected anomalies)
 
         for code_piece in Util.DataReader(data_paths):
             learning_data.code_to_xy_pairs(
                 code_piece,
-                xs,
-                ys,
+                xs_list,
+                ys_list,
                 name_to_vector,
                 type_to_vector,
                 node_type_to_vector,
-                code_pieces)
-        x_length = len(xs[0])
+                code_pieces_list)
+        x_length = len(xs_list[0])
 
-        #     print("Stats: " + str(learning_data.stats))
-        print("Number of x,y pairs: " + str(len(xs)))
+        print("Number of x,y pairs: " + str(len(xs_list)))
         print("Length of x vectors: " + str(x_length))
-        return [np.array(xs), np.array(ys), code_pieces]
+        return [np.array(xs_list), np.array(ys_list), code_pieces_list]
