@@ -7,7 +7,7 @@ Created on Jun 23, 2017
 import json
 from os.path import join
 from os import getcwd
-from collections import Counter, namedtuple
+from collections import namedtuple
 import math
 from keras.models import Sequential
 # from keras.models import load_model
@@ -23,6 +23,10 @@ from python import LearningDataSwappedBinOperands
 from python import LearningDataIncorrectBinaryOperand
 from python import LearningDataIncorrectAssignment
 from python import LearningDataMissingArg
+import pandas as pd
+
+
+pd.options.display.max_colwidth = 200
 
 
 name_embedding_size = 200
@@ -199,75 +203,87 @@ class AnomalyDetectorTrainee(object):
         pickle.dump(data_to_dump, open(self._validate_xy_code_pieces_pickle_file_path, "wb"))
 
     def compute_precision_and_recall_with_different_thresholds_for_reporting_anomalies(self):
+
         # assumption: correct and swapped arguments are alternating in list of x-y pairs
-        threshold_to_correct = Counter()
-        threshold_to_incorrect = Counter()
-        threshold_to_found_seeded_bugs = Counter()
-        threshold_to_warnings_in_orig_code = Counter()
         ys_prediction = self._model.predict(self._xs_validation)
-        poss_anomalies = []
-        for idx in range(0, len(self._xs_validation), 2):
-            y_prediction_orig = ys_prediction[idx][0]  # probab(original code should be changed), expect 0
-            y_prediction_changed = ys_prediction[idx + 1][0]  # probab(changed code should be changed), expect 1
-            # higher means more likely to be anomaly in current code
+
+        anomaly_df = self._create_anomaly_data_frame(ys_prediction)
+
+        anomaly_df = self._set_anomaly_and_normal_scores_for_code_pieces(anomaly_df)
+
+        self._print_scores_statistics(anomaly_df)
+        self._create_html_for_inspection(anomaly_df)
+
+    def _set_anomaly_and_normal_scores_for_code_pieces(self, anomaly_df):
+        def get_scores(anomaly_series):
             anomaly_score = \
                 self._learning_data.anomaly_score(
-                    y_prediction_orig,
-                    y_prediction_changed)
-            # higher means more likely to be correct in current code
+                    anomaly_series.probability_original,
+                    anomaly_series.probability_swapped)
             normal_score = \
                 self._learning_data.normal_score(
-                    y_prediction_orig,
-                    y_prediction_changed)
-            is_anomaly = False
-            for threshold_raw in range(1, 20, 1):
-                threshold = threshold_raw / 20.0
-                suggests_change_of_orig = anomaly_score >= threshold
-                suggests_change_of_changed = normal_score >= threshold
-                # counts for positive example
-                if suggests_change_of_orig:
-                    threshold_to_incorrect[threshold] += 1
-                    threshold_to_warnings_in_orig_code[threshold] += 1
-                else:
-                    threshold_to_correct[threshold] += 1
-                # counts for negative example
-                if suggests_change_of_changed:
-                    threshold_to_correct[threshold] += 1
-                    threshold_to_found_seeded_bugs[threshold] += 1
-                else:
-                    threshold_to_incorrect[threshold] += 1
+                    anomaly_series.probability_original,
+                    anomaly_series.probability_swapped)
+            return pd.Series([anomaly_score, normal_score], index=["anomaly_score", "normal_score"])
 
-                # check if we found an anomaly in the original code
-                if suggests_change_of_orig:
-                    is_anomaly = True
+        scores_df = anomaly_df.apply(get_scores, axis=1)
+        anomaly_df = pd.concat([anomaly_df, scores_df], axis=1)
+        return anomaly_df
 
-            if is_anomaly:
-                code_piece = self._code_pieces_validation[idx]
-                message = "Score : " + str(anomaly_score) + " | " + code_piece.to_message()
-                print("Possible anomaly: " + message)
-                # Log the possible anomaly for future manual inspection
-                poss_anomalies.append(Anomaly(message, anomaly_score))
+    @staticmethod
+    def _print_scores_statistics(anomaly_df):
+        score_threshold_array = np.array(range(1, 20, 1)) / 20.0
+        anomaly_score_df = \
+            anomaly_df.apply(
+                lambda x: pd.Series(x.anomaly_score > score_threshold_array, index=score_threshold_array),
+                axis=1)
+        normal_score_df = \
+            anomaly_df.apply(
+                lambda x: pd.Series(x.normal_score > score_threshold_array, index=score_threshold_array),
+                axis=1)
+        threshold_to_correct_series = (~anomaly_score_df).sum() + normal_score_df.sum()
+        threshold_to_incorrect_series = anomaly_score_df.sum() + (~normal_score_df).sum()
+        threshold_to_warnings_in_orig_code_series = anomaly_score_df.sum()
+        threshold_to_found_seeded_bugs_series = normal_score_df.sum()
+        print("threshold_to_correct_series")
+        print(threshold_to_correct_series)
+        print("threshold_to_incorrect_series")
+        print(threshold_to_incorrect_series)
+        print("threshold_to_warnings_in_orig_code_series")
+        print(threshold_to_warnings_in_orig_code_series)
+        print("threshold_to_found_seeded_bugs_series")
+        print(threshold_to_found_seeded_bugs_series)
 
-        f_inspect = open('poss_anomalies.txt', 'w+')
-        poss_anomalies = sorted(poss_anomalies, key=lambda a: -a.score)
-        for anomaly in poss_anomalies:
-            f_inspect.write(anomaly.message + "\n")
-        print("Possible Anomalies written to file : poss_anomalies.txt")
-        f_inspect.close()
+    @staticmethod
+    def _create_html_for_inspection(anomaly_df):
+        anomaly_df["message"] = anomaly_df.code_piece.apply(lambda x: x.to_message())
+        classified_anomaly_df = anomaly_df[anomaly_df.anomaly_score > 0]
+        to_inspect_df = \
+            classified_anomaly_df[["anomaly_score", "message"]].sort_values(
+                by="anomaly_score",
+                ascending=False)
+        html_file_path = 'possible_anomalies.html'
+        open(html_file_path, 'w+').write(to_inspect_df.to_html())
+        print("created {}".format(html_file_path))
 
-        print()
-        for threshold_raw in range(1, 20, 1):
-            threshold = threshold_raw / 20.0
-            recall = (threshold_to_found_seeded_bugs[threshold] * 1.0) / (len(self._xs_validation) / 2)
-            precision = 1 - ((threshold_to_warnings_in_orig_code[threshold] * 1.0) / (len(self._xs_validation) / 2))
-            if threshold_to_correct[threshold] + threshold_to_incorrect[threshold] > 0:
-                accuracy = threshold_to_correct[threshold] * 1.0 / (
-                            threshold_to_correct[threshold] + threshold_to_incorrect[threshold])
-            else:
-                accuracy = 0.0
-            print("Threshold: " + str(threshold) + "   Accuracy: " + str(round(accuracy, 4)) + "   Recall: " + str(
-                round(recall, 4)) + "   Precision: " + str(round(precision, 4)) + "  #Warnings: " + str(
-                threshold_to_warnings_in_orig_code[threshold]))
+    def _create_anomaly_data_frame(self, ys_prediction):
+        ys_validation = self._ys_validation.flatten()
+        ys_prediction = ys_prediction.flatten()
+        ys_validation_original = ys_validation[::2]
+        ys_validation_swapped = ys_validation[1::2]
+        ys_prediction_original = ys_prediction[::2]
+        ys_prediction_swapped = ys_prediction[1::2]
+        code_pieces_validation_unique = self._code_pieces_validation[::2]
+        anomaly_df = pd.DataFrame(
+            [ys_validation_original, ys_prediction_original, ys_validation_swapped, ys_prediction_swapped,
+             code_pieces_validation_unique]).T
+        anomaly_df.columns = \
+            ["label_original",
+             "probability_original",
+             "label_swapped",
+             "probability_swapped",
+             "code_piece"]
+        return anomaly_df
 
     def _parse_data_path_pattern(self, data_path_pattern):
         data_paths_list = glob.glob(join(getcwd(), data_path_pattern))[:self._max_files_list_length]
