@@ -213,6 +213,7 @@ class AnomalyDetectorTrainee(object):
 
         self._print_scores_statistics(anomaly_df)
         self._create_html_for_inspection(anomaly_df)
+        self._save_anomaly_df_to_pickle(anomaly_df)
 
     def _set_anomaly_and_normal_scores_for_code_pieces(self, anomaly_df):
         def get_scores(anomaly_series):
@@ -309,3 +310,9 @@ class AnomalyDetectorTrainee(object):
         print("Number of x,y pairs: " + str(len(xs_list)))
         print("Length of x vectors: " + str(x_length))
         return [np.array(xs_list), np.array(ys_list), code_pieces_list]
+
+    @staticmethod
+    def _save_anomaly_df_to_pickle(anomaly_df):
+        anomaly_df_pickle_file_path = "anomaly_df.pickle"
+        pickle.dump(anomaly_df, open(anomaly_df_pickle_file_path, "wb"))
+        print("saved anomaly data frame into {}".format(anomaly_df_pickle_file_path))
